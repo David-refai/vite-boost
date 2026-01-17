@@ -1,10 +1,9 @@
 {
   "name": "@refai.code/vite-boost",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Vite Vanilla JS booster script (optional Tailwind/Axios/PWA/JSON-server)",
   "license": "MIT",
   "private": false,
-
   "homepage": "https://github.com/David-refai/vite-boost",
   "repository": {
     "type": "git",
@@ -24,5 +23,12 @@
   "publishConfig": {
     "access": "public"
   },
-  "keywords": ["vite", "cli", "pwa", "tailwind", "json-server", "scaffold"]
+  "keywords": [
+    "vite",
+    "cli",
+    "pwa",
+    "tailwind",
+    "json-server",
+    "scaffold"
+  ]
 }
