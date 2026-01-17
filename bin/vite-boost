@@ -1,0 +1,1676 @@
+#!/usr/bin/env zsh
+emulate -L zsh
+set -u
+
+# ==========================================
+# 🚀 Vite Boost: Refai.Code Final Ultimate
+# ==========================================
+# Features:
+# - Smart Router (Scroll/Hash/Auth)
+# - Glassmorphism UI (Login/Signup with Socials)
+# - Real JSON Server Auth (Users save to db.json)
+# - Concurrent Run (Vite + JSON Server)
+
+# Handle exit vs return safely
+terminate() {
+  local code="${1:-0}"
+  # Check if we are being sourced
+  if [[ "$ZSH_EVAL_CONTEXT" == "toplevel" || "$ZSH_EVAL_CONTEXT" == "shfunc" ]]; then
+     return "$code" 2>/dev/null || exit "$code"
+  else
+     exit "$code"
+  fi
+}
+
+die()  { print -P "%F{red}❌ $*%f" >&2; terminate 1; }
+warn() { print -P "%F{yellow}⚠️  $*%f" >&2; }
+ok()   { print -P "%F{green}✅ $*%f"; }
+
+VERSION="0.1.0"
+
+# -----------------------------
+# Help / Version
+# -----------------------------
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  cat <<'EOF'
+vite-boost (Refai.Code)
+
+Usage:
+  npx vite-boost
+  npx vite-boost --help
+  npx vite-boost --version
+
+Notes:
+- Run inside a Vite Vanilla JS project folder (package.json, index.html, src/)
+EOF
+  terminate 0
+fi
+
+if [[ "${1:-}" == "--version" || "${1:-}" == "-v" ]]; then
+  print "vite-boost v${VERSION}"
+  terminate 0
+fi
+
+print ""
+print "🚀 \033[1;36mVite Boost: Refai.Code Final Edition\033[0m"
+print ""
+
+# -----------------------------
+# Validation: Must be in a Vite project folder
+# -----------------------------
+# --- Validation: Check if it's a Vite project ---
+if [[ ! -f package.json ]]; then
+  print -u2 "❌ Error: package.json not found. Are you in the right directory?"
+  terminate 1
+fi
+
+if ! grep -q '"vite"' package.json 2>/dev/null; then
+  print -u2 "⚠️  Warning: Vite not found in package.json."
+  if ! read -k 1 "choice?This doesn't look like a Vite project. Continue anyway? (y/N) "; then
+    echo ""
+    print -u2 "❌ Setup cancelled."
+    terminate 1
+  fi
+  echo ""
+fi
+ok "Proceeding..."
+print ""
+
+# --- 1. Interactive Prompts ---
+ask() {
+  print -n "📦 Install $1? (y/N) "
+  read -k 1 choice
+  echo ""
+  if [[ "$choice" == [Yy] ]]; then
+    print "  ✅ Selected $1"
+    eval "$2=true"
+  else
+    print "  ❌ Skipped $1"
+    eval "$2=false"
+  fi
+  print ""
+}
+
+# Helper: Check file overwrite
+# returns: 0 always (never trips set -e)
+# sets global var: OVERWRITE_OK=true/false
+check_overwrite() {
+  local file="$1"
+  if [[ -f "$file" ]]; then
+    print -n "⚠️  $file already exists. Overwrite? (y/N) "
+    read -k 1 choice
+    echo ""
+    if [[ "$choice" == [Yy] ]]; then
+      return 0  # Yes, overwrite
+    else
+      print "  ⏭️  Skipped $file"
+      return 1  # No, skip
+    fi
+  fi
+  return 0
+}
+
+# write file with preview diff + choices
+write_file() {
+  local file="$1"
+  local tmp dir
+  tmp="$(mktemp)"
+
+  cat > "$tmp"
+
+  dir="$(dirname -- "$file")"
+  mkdir -p "$dir"
+
+  # if file doesn't exist, optionally still ask
+  if [[ ! -f "$file" ]]; then
+    if [[ "${ALWAYS_CONFIRM_OVERWRITE:-false}" == "true" ]]; then
+      if [[ "$choice" == [Nn] ]]; then
+        rm -f "$tmp"
+        warn "Skipped $file"
+        return 0 # Continue script
+      fi
+    fi
+    mv "$tmp" "$file"
+    ok "Created $file"
+    return 0
+  fi
+
+  # same content => do nothing
+  if cmp -s "$tmp" "$file" 2>/dev/null; then
+    rm -f "$tmp"
+    ok "Unchanged $file"
+    return 0
+  fi
+
+  while true; do
+    print -n "⚠️  ${file} exists. [y] overwrite / [n] skip / [d] diff (n): "
+    local ans; IFS= read -r ans
+    ans="${ans:l}"
+    case "$ans" in
+      y|yes)
+        mv "$tmp" "$file"
+        ok "Overwritten $file"
+        return 0
+        ;;
+      d|diff)
+        if command -v git >/dev/null 2>&1; then
+          git --no-pager diff --no-index -- "$file" "$tmp" || true
+        else
+          diff -u -- "$file" "$tmp" || true
+        fi
+        ;;
+      ""|n|no)
+        rm -f "$tmp"
+        warn "Skipped $file"
+        return 0 # Continue script
+        ;;
+      *)
+        warn "Choose y / n / d"
+        ;;
+    esac
+  done
+}
+upsert_block() {
+  local file="$1"
+  local start="$2"
+  local end="$3"
+  local tmp
+  tmp="$(mktemp)"
+
+  # Read stdin into tmp (the new block content)
+  cat > "$tmp"
+
+  # If file doesn't exist, just write it
+  if [[ ! -f "$file" ]]; then
+    mkdir -p "${file:h}"
+    cat "$tmp" > "$file"
+    rm -f "$tmp"
+    return 0
+  fi
+
+  # If markers exist, replace block
+  if grep -qF "$start" "$file" && grep -qF "$end" "$file"; then
+    # keep everything before start + new block + everything after end
+    awk -v s="$start" -v e="$end" '
+      BEGIN{in=0}
+      index($0,s){print; in=1; next}
+      index($0,e){in=0; print; next}
+      in==0{print}
+    ' "$file" > "${file}.tmp"
+
+    # Insert new content between markers
+    awk -v s="$start" -v e="$end" '
+      {print}
+      index($0,s){
+        while ((getline line < "'"$tmp"'") > 0) print line
+        close("'"$tmp"'")
+      }
+    ' "${file}.tmp" > "$file"
+
+    rm -f "${file}.tmp" "$tmp"
+  else
+    # markers not found => append safely once
+    cat >> "$file" <<EOF
+
+$start
+EOF
+    cat "$tmp" >> "$file"
+    cat >> "$file" <<EOF
+$end
+EOF
+    rm -f "$tmp"
+  fi
+}
+# Defaults
+tail=false
+expr=false
+pwa=false
+axio=false
+json=false
+
+# Track what was installed
+installed_packages=()
+
+ask "TailwindCSS" tail
+ask "Axios (HTTP Client)" axio
+ask "PWA Support" pwa
+ask "JSON Server (Real Database & Auth)" json
+
+# ==========================================
+# 🛠️ Architecture Setup
+# ==========================================
+print ""
+print "📁 Creating project structure..."
+mkdir -p src/{components,pages,router,styles,services,utils,assets}
+
+# -----------------------------
+# 1. Utilities
+# -----------------------------
+print "\n🔧 Generating utility files..."
+if check_overwrite "src/utils/helpers.js"; then
+  cat > src/utils/helpers.js <<'EOF'
+export const sanitize = (str) => {
+  if (!str) return '';
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+};
+
+export const renderStars = (rating) => {
+  const stars = Math.round(rating);
+  let html = '';
+  for (let i = 1; i <= 5; i++) {
+    html += `<span style="color: ${i <= stars ? '#f59e0b' : '#d1d5db'}">★</span>`;
+  }
+  return html;
+};
+
+export const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+EOF
+fi
+
+cat > src/utils/toast.js <<'EOF'
+export const toast = {
+  show: (msg, type = 'error') => {
+    const el = document.createElement('div');
+    const color = type === 'success' ? '#10b981' : '#ef4444';
+    el.style.cssText = `
+      position: fixed; top: 20px; right: 20px;
+      background: ${color}; color: white; padding: 1rem 1.5rem;
+      border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      z-index: 9999; animation: slideIn 0.3s ease-out; font-weight: 500;
+    `;
+    el.textContent = msg;
+    document.body.appendChild(el);
+    setTimeout(() => {
+      el.style.opacity = '0';
+      el.style.transform = 'translateY(-20px)';
+      el.style.transition = 'all 0.3s';
+      setTimeout(() => el.remove(), 300);
+    }, 3000);
+  }
+};
+EOF
+
+# -----------------------------
+# 2. API & Auth Services
+# -----------------------------
+# Dynamic API Service
+if [ "$axio" = true ]; then
+  cat > src/services/api.js <<'EOF'
+import axios from 'axios';
+import { toast } from '../utils/toast.js';
+
+const API_URL = 'http://localhost:3000';
+
+const handle = async (promise) => {
+  try {
+    const res = await promise;
+    return res.data;
+  } catch (err) {
+    console.error(err);
+    toast.show(err.response?.data?.message || err.message || 'API Error', 'error');
+    throw err;
+  }
+};
+
+export const api = {
+  get: (url) => handle(axios.get(`${API_URL}${url}`)),
+  post: (url, data) => handle(axios.post(`${API_URL}${url}`, data)),
+  put: (url, data) => handle(axios.put(`${API_URL}${url}`, data)),
+  delete: (url) => handle(axios.delete(`${API_URL}${url}`))
+};
+EOF
+else
+  cat > src/services/api.js <<'EOF'
+import { toast } from '../utils/toast.js';
+
+const API_URL = 'http://localhost:3000';
+
+const request = async (url, options = {}) => {
+  try {
+    const res = await fetch(`${API_URL}${url}`, {
+      headers: { 'Content-Type': 'application/json' },
+      ...options,
+    });
+    if (!res.ok) throw new Error(`API Error: ${res.statusText}`);
+    return await res.json();
+  } catch (err) {
+    console.error(err);
+    toast.show(err.message, 'error');
+    throw err;
+  }
+};
+
+export const api = {
+  get: (url) => request(url),
+  post: (url, data) => request(url, { method: 'POST', body: JSON.stringify(data) }),
+  delete: (url) => request(url, { method: 'DELETE' }),
+  put: (url, data) => request(url, { method: 'PUT', body: JSON.stringify(data) })
+};
+EOF
+fi
+
+# Auth Service with persistent state
+cat > src/services/auth.js <<'EOF'
+
+import { api } from './api.js';
+import { toast } from '../utils/toast.js';
+
+export const authState = {
+  user: JSON.parse(localStorage.getItem('user')) || null,
+  listeners: [],
+
+  subscribe(fn) { this.listeners.push(fn); },
+  notify() { this.listeners.forEach(fn => fn(this.user)); },
+
+  async login(email, password) {
+    try {
+      // For JSON Server, we simulate login by fetching users
+      const users = await api.get(`/users?email=${email}`);
+      const user = users.find(u => u.password === password);
+
+      if (!user) {
+        throw new Error('Invalid credentials');
+      }
+
+      this.user = user;
+      localStorage.setItem('user', JSON.stringify(user));
+      this.notify();
+      toast.show(`Welcome back, ${user.firstName}!`, 'success');
+      return true;
+    } catch (err) {
+      toast.show('Login failed: Invalid email or password');
+      return false;
+    }
+  },
+
+  async signup(data) {
+    try {
+      // Check if user exists
+      const existing = await api.get(`/users?email=${data.email}`);
+      if (existing.length > 0) throw new Error('Email already registered');
+
+      const newUser = {
+        ...data,
+        avatar: `https://ui-avatars.com/api/?name=${data.firstName}+${data.lastName}&background=4f46e5&color=fff`
+      };
+
+      await api.post('/users', newUser);
+      toast.show('Account created! Please login.', 'success');
+      return true;
+    } catch (err) {
+      toast.show(err.message);
+      return false;
+    }
+  },
+
+  // Edit profile method
+  async updateProfile(updatedData) {
+    try {
+      if (!this.user) throw new Error('No user logged in');
+
+      const updatedUser = { ...this.user, ...updatedData };
+      await api.put(`/users/${this.user.id}`, updatedUser);
+
+      this.user = updatedUser;
+      localStorage.setItem('user', JSON.stringify(updatedUser));
+      this.notify();
+      toast.show('Profile updated successfully', 'success');
+      return true;
+    } catch (err) {
+      toast.show('Profile update failed: ' + err.message);
+      return false;
+    }
+  },
+
+  logout() {
+    this.user = null;
+    localStorage.removeItem('user');
+    this.notify();
+    toast.show('Logged out successfully', 'success');
+    window.location.href = '/';
+  }
+};
+EOF
+
+# -----------------------------
+# 3. Router
+# -----------------------------
+cat > src/router/LiteRouter.js <<'EOF'
+export class LiteRouter {
+  constructor(routes, appElement) {
+    this.routes = routes;
+    this.app = document.querySelector(appElement);
+
+    window.addEventListener('popstate', () => this.loadRoute());
+
+    document.body.addEventListener('click', e => {
+      const anchor = e.target.closest('a[href^="#"]');
+      if (anchor) {
+        e.preventDefault();
+        const id = anchor.getAttribute('href');
+        if (window.location.pathname !== '/') {
+           this.navigateTo('/' + id);
+        } else {
+           this.scrollToId(id);
+        }
+        return;
+      }
+
+      const link = e.target.closest('[data-link]');
+      if (link) {
+        e.preventDefault();
+        this.navigateTo(link.getAttribute('href'));
+      }
+    });
+
+    // Initial Load Logic
+    window.addEventListener('load', () => {
+      this.loadRoute();
+    });
+  }
+
+  navigateTo(url) {
+    history.pushState(null, null, url);
+    this.loadRoute();
+  }
+
+  async loadRoute() {
+    let path = window.location.pathname;
+
+    // Check hash intent from other pages
+    let hashTarget = '';
+    if (path.includes('/#')) {
+      const parts = path.split('/#');
+      path = '/';
+      hashTarget = '#' + parts[1];
+    }
+
+    if (path === '/index.html') path = '/';
+
+    const match = this.routes.find(r => {
+      const rx = new RegExp("^" + r.path.replace(/:(\w+)/g, "(?<$1>[^/]+)") + "$");
+      return path.match(rx);
+    }) || this.routes.find(r => r.path === '*');
+
+    const result = path.match(new RegExp("^" + match.path.replace(/:(\w+)/g, "(?<$1>[^/]+)") + "$"));
+    const params = result?.groups || {};
+    const search = new URLSearchParams(window.location.search);
+
+    // Layout
+    if (match.layout) {
+      if (!this.currentLayout || this.currentLayout !== match.layout) {
+        this.app.innerHTML = await match.layout();
+        this.currentLayout = match.layout;
+      }
+    }
+
+    const outlet = this.app.querySelector('[data-outlet]') || this.app;
+
+    // Spinner
+    outlet.innerHTML = '<div class="spinner-container"><div class="spinner"></div></div>';
+
+    try {
+      const view = await match.component({ params, query: search });
+      outlet.innerHTML = view;
+    } catch (err) {
+      outlet.innerHTML = `<div class="error-page"><h2>Error</h2><p>${err.message}</p></div>`;
+    }
+
+    if (match.title) document.title = match.title;
+
+    // Scroll Handling
+    if (hashTarget) {
+      setTimeout(() => this.scrollToId(hashTarget), 300);
+    } else if (!window.location.hash) {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }
+
+  scrollToId(id) {
+    const el = document.querySelector(id);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  init() {
+    // defer init call to window.load often safest or immediate
+  }
+}
+EOF
+
+# -----------------------------
+# 4. Styles (Glass, Spinner, Cards)
+# -----------------------------
+write_file "src/styles/main.css" <<'EOF'
+:root {
+  --primary: #4f46e5;
+  --bg: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+  --text: #1f2937;
+  --glass: rgba(255, 255, 255, 0.85);
+  --glass-border: rgba(255, 255, 255, 0.4);
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin:0; font-family: 'Outfit', sans-serif; background: var(--bg); min-height: 100vh; color: var(--text); }
+html, body { overflow-x: hidden; }
+
+/* Keyframes */
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes slideIn { from { transform: translateY(-20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+/* Utils */
+.container { max-width: 1200px; margin: 0 auto; padding: 2rem; }
+.spinner-container { display: flex; justify-content: center; padding: 4rem; width: 100%; }
+.spinner { width: 40px; height: 40px; border: 4px solid #ddd; border-top-color: var(--primary); border-radius: 50%; animation: spin 0.8s linear infinite; }
+
+/* Buttons */
+.btn {
+  padding: 0.75rem 1.5rem; border-radius: 8px; border: none; font-weight: 600; cursor: pointer;
+  transition: all 0.2s; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem;
+}
+.btn-primary {
+background: var(--primary);
+color: white;
+box-shadow: 0 4px 6px -1px rgba(79, 70, 229, 0.3);
+}
+.btn-primary:hover {
+transform: translateY(-2px);
+box-shadow: 0 6px 15px -3px rgba(79, 70, 229, 0.4);
+}
+.btn-social {
+background: white;
+border: 1px solid #e5e7eb; color: #374151;
+width: 100%; font-weight: 500;}
+.btn-social:hover {
+background: #f9fafb;
+border-color: #d1d5db;
+}
+
+/* Glass Card */
+.glass-panel {
+  background: var(--glass);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--glass-border);
+  border-radius: 16px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.05);
+  padding: 2.5rem;
+}
+
+/* Auth Specific */
+.auth-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 80vh;
+}
+.auth-box {
+  width: 100%; max-width: 420px;
+}
+input {
+  width: 100%;
+  padding: 0.8rem 1rem;
+  margin-bottom: 1rem;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  font-size: 1rem;
+  transition: border 0.2s;
+}
+input:focus {
+outline: none;
+border-color: var(--primary);
+box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.1); }
+
+/* Navbar Mobile Responsive */
+.navbar {
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  background: rgba(255,255,255,0.95);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid rgba(0,0,0,0.05);
+  padding: 0.5rem 0;
+}
+.nav-inner {
+  max-width: 1200px;
+  margin:0 auto;
+  padding: 0 1.5rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 60px;
+}
+.nav-links {
+display: flex;
+align-items: center;
+gap: 2rem;
+}
+.nav-links a {
+  text-decoration: none;
+  color: var(--text);
+  font-weight: 500;
+  padding: 0.5rem 1rem;
+  border-radius: 8px;
+  transition: all 0.2s;
+}
+.nav-links a:hover {
+  color: var(--primary);
+   background: rgba(0,0,0,0.05);
+   }
+.nav-links a.active {
+  color: white;
+  background: var(--primary);
+}
+
+/* Hamburger */
+.hamburger {
+display: none;
+font-size: 1.5rem;
+cursor: pointer;
+background:none;
+border:none; color:var(--text); }
+
+/* Mobile Menu */
+@media (max-width: 768px) {
+  .nav-links {
+    display: none;
+    position: absolute;
+    top: 60px;
+    left: 0;
+    width: 100%;
+    background: white;
+    flex-direction: column;
+    padding: 1rem 0;
+    box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);
+    border-top: 1px solid #eee;
+  }
+  .nav-links.active {
+  display: flex;
+  }
+  .nav-links a {
+   margin: 0; padding: 1rem;
+   width: 100%; text-align: center;
+   }
+  .nav-links div {
+   border:none !important;
+   padding: 1rem 0 !important;
+   margin:0 !important;
+   width: 100%;
+   display: flex;
+   justify-content: center;
+   }
+  .hamburger {
+   display: block;
+    }
+}
+
+/* Modal Overlay System */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px);
+  display: flex; justify-content: center; align-items: center; z-index: 2000;
+  animation: fadeIn 0.2s ease-out;
+}
+.modal-content {
+  background: white; width: 100%; max-width: 450px; border-radius: 16px; padding: 2rem;
+  box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1);
+  position: relative; animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.close-modal {
+  position: absolute; top: 1rem; right: 1rem; background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #999;
+}
+@keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+.grid {
+display: grid;
+grid-template-columns: repeat(auto-fill,
+minmax(280px, 1fr));
+gap: 2rem;
+}
+.card {
+  background: white;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+  transition: transform 0.2s;
+  display: flex;
+  flex-direction: column;
+}
+.card:hover {
+transform: translateY(-5px);
+box-shadow: 0 12px 20px -5px rgba(0,0,0,0.1); }
+.card-img {
+ width: 100%;
+ height: 220px;
+ object-fit: cover;
+ }
+.card-body {
+ padding: 1.5rem;
+ flex: 1; display:
+ flex; flex-direction: column;
+ }
+
+/* Product Detail Page Responsive */
+@media (max-width: 768px) {
+  .glass-panel {
+  grid-template-columns: 1fr !important;
+  padding: 1.5rem !important;
+  }
+  .product-detail-img {
+  margin-bottom: 1.5rem;
+  }
+}
+EOF
+
+# -----------------------------
+# 5. Components
+# -----------------------------
+cat > src/components/Navbar.js <<'EOF'
+import { authState } from '../services/auth.js';
+import { openLoginModal, openProfileModal, openSignupModal } from '../utils/modals.js';
+
+export const Navbar = () => {
+  const user = authState.user;
+
+  // Toggle Mobile Menu Logic
+  setTimeout(() => {
+    const btn = document.getElementById('hamburger-btn');
+    const menu = document.getElementById('nav-menu');
+    if(btn && menu) {
+      btn.onclick = () => menu.classList.toggle('active');
+      // Close menu when clicking any link
+      menu.querySelectorAll('a, button').forEach(el => {
+        el.addEventListener('click', () => menu.classList.remove('active'));
+      });
+    }
+  }, 0);
+
+  return `<nav class="navbar">
+      <div class="nav-inner">
+        <a href="/" class="logo" style="font-weight:800; font-size:1.4rem; text-decoration:none; color:var(--text)" data-link>
+          Refai<span style="color:var(--primary)">.Code</span>
+        </a>
+
+        <button class="hamburger" id="hamburger-btn">☰</button>
+
+        <div class="nav-links" id="nav-menu">
+          <a href="/" data-link>Home</a>
+          <a href="#about">About</a>
+          <a href="/products" data-link>Products</a>
+
+          <div style="margin-left: 2rem; padding-left: 2rem; border-left: 1px solid #ddd;">
+            ${user ? `
+              <div style="display:flex; align-items:center; gap:0.6rem; cursor:pointer;" onclick="window.openProfile()">
+                 <img src="${user.avatar}" style="width:34px; height:34px; border-radius:50%; border:2px solid var(--primary);" alt="Avatar">
+                 <span style="font-weight:600; font-size:0.9rem;">${user.firstName}</span>
+              </div>
+             ` : `
+               <button class="btn btn-primary" onclick="window.openLogin()" style="padding:0.4rem 1.2rem; font-size:0.9rem;">Sign In</button>
+            `}
+          </div>
+        </div>
+      </div>
+    </nav>
+  `;
+};
+
+// Global handlers for Modals
+window.openLogin = openLoginModal;
+window.openProfile = openProfileModal;
+window.openSignup = openSignupModal;
+EOF
+
+# --- Modal Manager (New File) ---
+cat > src/utils/modals.js <<'EOF'
+import { authState } from '../services/auth.js';
+import { toast } from './toast.js';
+
+const createOverlay = (content) => {
+  const existing = document.querySelector('.modal-overlay');
+  if(existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal-content">
+      <button class="close-modal" onclick="this.closest('.modal-overlay').remove()">×</button>
+      ${content}
+    </div>
+  `;
+  overlay.addEventListener('click', (e) => {
+    if(e.target === overlay) overlay.remove();
+  });
+  document.body.appendChild(overlay);
+  return overlay;
+};
+
+export const openLoginModal = () => {
+  createOverlay(`
+    <h2 style="text-align:center; margin-bottom:1rem;">Welcome Back</h2>
+    <p style="text-align:center; color:#6b7280; margin-bottom:1.5rem; font-size:0.9rem;">Sign in to your account</p>
+
+    <form onsubmit="window.handleLogin(event)">
+      <input type="email" name="email" value="admin@refai.code" placeholder="Email Address" required>
+      <input type="password" name="password" value="admin123" placeholder="Password" required>
+      <button type="submit" class="btn btn-primary" style="width:100%; margin-bottom:1rem;">Sign In</button>
+    </form>
+
+    <div style="display:flex; align-items:center; margin:1.5rem 0; color:#9ca3af; font-size:0.85rem;">
+      <div style="flex:1; height:1px; background:#e5e7eb;"></div>
+      <span style="padding:0 1rem;">OR CONTINUE WITH</span>
+      <div style="flex:1; height:1px; background:#e5e7eb;"></div>
+    </div>
+
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.8rem; margin-bottom:1rem;">
+      <button class="btn btn-social" onclick="toast.show('Google Auth Coming Soon', 'error')">
+        <svg width="18" height="18" viewBox="0 0 24 24"><path fill="currentColor" d="M21.35,11.1H12.18V13.83H18.69C18.36,17.64 15.19,19.27 12.19,19.27C8.36,19.27 5,16.25 5,12.61C5,9.5 7.81,5.7 12.19,5.7C13.63,5.7 15.71,6.5 16.55,7.34L19.07,4.8C16.8,2.77 14.28,2.15 12.18,2.15C5.83,2.15 1.15,7.39 1.15,12.61C1.15,17.97 4.96,22.85 12.18,22.85C18.27,22.85 22.85,17.7 22.85,12.61C22.85,11.75 22.75,11.53 22.65,11.1H21.35Z"/></svg> Google
+      </button>
+      <button class="btn btn-social" onclick="toast.show('GitHub Auth Coming Soon', 'error')">
+        <svg width="18" height="18" viewBox="0 0 24 24"><path fill="currentColor" d="M12,2A10,10 0 0,0 2,12C2,16.42 4.87,20.17 8.84,21.5C9.34,21.58 9.5,21.27 9.5,21C9.5,20.77 9.5,20.14 9.5,19.31C6.73,19.91 6.14,17.97 6.14,17.97C5.68,16.81 5.03,16.5 5.03,16.5C4.12,15.88 5.1,15.9 5.1,15.9C6.1,15.97 6.63,16.93 6.63,16.93C7.5,18.45 8.97,18 9.54,17.76C9.63,17.11 9.89,16.67 10.17,16.42C7.95,16.17 5.62,15.31 5.62,11.5C5.62,10.39 6,9.5 6.65,8.79C6.55,8.54 6.2,7.5 6.75,6.15C6.75,6.15 7.59,5.88 9.5,7.17C10.29,6.95 11.15,6.84 12,6.84C12.85,6.84 13.71,6.95 14.5,7.17C16.41,5.88 17.25,6.15 17.25,6.15C17.8,7.5 17.45,8.54 17.35,8.79C18,9.5 18.38,10.39 18.38,11.5C18.38,15.32 16.04,16.16 13.81,16.41C14.17,16.72 14.5,17.33 14.5,18.26C14.5,19.6 14.5,20.68 14.5,21C14.5,21.27 14.66,21.59 15.17,21.5C19.14,20.16 22,16.42 22,12A10,10 0 0,0 12,2Z"/></svg> GitHub
+      </button>
+    </div>
+
+    <p style="text-align:center; font-size:0.85rem; color:#6b7280;">
+      Don't have an account? <a href="#" onclick="event.preventDefault(); window.openSignup()" style="color:var(--primary); font-weight:600; text-decoration:none;">Sign Up</a>
+    </p>
+  `);
+};
+
+export const openSignupModal = () => {
+  createOverlay(`
+    <h2 style="text-align:center; margin-bottom:1rem;">Create Account</h2>
+    <p style="text-align:center; color:#6b7280; margin-bottom:1.5rem; font-size:0.9rem;">Join Refai.Code today</p>
+
+    <form onsubmit="window.handleSignup(event)">
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.5rem;">
+        <input type="text" name="firstName" placeholder="First Name" required>
+        <input type="text" name="lastName" placeholder="Last Name" required>
+      </div>
+      <input type="email" name="email" placeholder="Email Address" required>
+      <input type="password" name="password" placeholder="Create Password" required>
+      <button type="submit" class="btn btn-primary" style="width:100%; margin-bottom:1rem;">Create Account</button>
+    </form>
+
+    <div style="display:flex; align-items:center; margin:1.5rem 0; color:#9ca3af; font-size:0.85rem;">
+      <div style="flex:1; height:1px; background:#e5e7eb;"></div>
+      <span style="padding:0 1rem;">OR SIGN UP WITH</span>
+      <div style="flex:1; height:1px; background:#e5e7eb;"></div>
+    </div>
+
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.8rem; margin-bottom:1rem;">
+      <button class="btn btn-social" onclick="toast.show('Google Auth Coming Soon', 'error')">
+        <svg width="18" height="18" viewBox="0 0 24 24"><path fill="currentColor" d="M21.35,11.1H12.18V13.83H18.69C18.36,17.64 15.19,19.27 12.19,19.27C8.36,19.27 5,16.25 5,12.61C5,9.5 7.81,5.7 12.19,5.7C13.63,5.7 15.71,6.5 16.55,7.34L19.07,4.8C16.8,2.77 14.28,2.15 12.18,2.15C5.83,2.15 1.15,7.39 1.15,12.61C1.15,17.97 4.96,22.85 12.18,22.85C18.27,22.85 22.85,17.7 22.85,12.61C22.85,11.75 22.75,11.53 22.65,11.1H21.35Z"/></svg> Google
+      </button>
+      <button class="btn btn-social" onclick="toast.show('GitHub Auth Coming Soon', 'error')">
+        <svg width="18" height="18" viewBox="0 0 24 24"><path fill="currentColor" d="M12,2A10,10 0 0,0 2,12C2,16.42 4.87,20.17 8.84,21.5C9.34,21.58 9.5,21.27 9.5,21C9.5,20.77 9.5,20.14 9.5,19.31C6.73,19.91 6.14,17.97 6.14,17.97C5.68,16.81 5.03,16.5 5.03,16.5C4.12,15.88 5.1,15.9 5.1,15.9C6.1,15.97 6.63,16.93 6.63,16.93C7.5,18.45 8.97,18 9.54,17.76C9.63,17.11 9.89,16.67 10.17,16.42C7.95,16.17 5.62,15.31 5.62,11.5C5.62,10.39 6,9.5 6.65,8.79C6.55,8.54 6.2,7.5 6.75,6.15C6.75,6.15 7.59,5.88 9.5,7.17C10.29,6.95 11.15,6.84 12,6.84C12.85,6.84 13.71,6.95 14.5,7.17C16.41,5.88 17.25,6.15 17.25,6.15C17.8,7.5 17.45,8.54 17.35,8.79C18,9.5 18.38,10.39 18.38,11.5C18.38,15.32 16.04,16.16 13.81,16.41C14.17,16.72 14.5,17.33 14.5,18.26C14.5,19.6 14.5,20.68 14.5,21C14.5,21.27 14.66,21.59 15.17,21.5C19.14,20.16 22,16.42 22,12A10,10 0 0,0 12,2Z"/></svg> GitHub
+      </button>
+    </div>
+
+    <p style="text-align:center; font-size:0.85rem; color:#6b7280;">
+      Already have an account? <a href="#" onclick="event.preventDefault(); window.openLogin()" style="color:var(--primary); font-weight:600; text-decoration:none;">Log In</a>
+    </p>
+  `);
+};
+
+export const openProfileModal = () => {
+  const u = authState.user;
+  if(!u) return;
+
+  createOverlay(`
+    <div style="text-align:center; margin-bottom:1.5rem;">
+      <img src="${u.avatar}" style="width:80px; height:80px; border-radius:50%; margin-bottom:1rem; border:3px solid var(--primary);">
+      <h3>Edit Profile</h3>
+    </div>
+    <form onsubmit="window.handleUpdateProfile(event)">
+      <div style="display:flex; gap:0.5rem;">
+        <input type="text" name="firstName" value="${u.firstName}" placeholder="First Name">
+        <input type="text" name="lastName" value="${u.lastName}" placeholder="Last Name">
+      </div>
+      <input type="email" name="email" value="${u.email}" readonly style="background:#f3f4f6; color:#999;" title="Email cannot be changed">
+      <input type="password" name="password" placeholder="New Password (Optional)">
+
+      <div style="display:flex; gap:1rem; margin-top:1rem;">
+        <button type="button" class="btn" style="flex:1; background:#fee; color:red;" onclick="window.auth.logout()">Logout</button>
+        <button type="submit" class="btn btn-primary" style="flex:1;">Update Profile</button>
+      </div>
+    </form>
+  `);
+};
+
+// Logic Handlers attached to window
+window.handleLogin = async (e) => {
+  e.preventDefault();
+  const email = e.target.email.value;
+  const pass = e.target.password.value;
+  const success = await authState.login(email, pass);
+  if(success) document.querySelector('.modal-overlay')?.remove();
+};
+
+window.handleSignup = async (e) => {
+  e.preventDefault();
+  const data = {
+    firstName: e.target.firstName.value,
+    lastName: e.target.lastName.value,
+    email: e.target.email.value,
+    password: e.target.password.value
+  };
+  const success = await authState.signup(data);
+  if(success) {
+    document.querySelector('.modal-overlay')?.remove();
+    setTimeout(() => openLoginModal(), 300);
+  }
+};
+
+window.handleUpdateProfile = async (e) => {
+  e.preventDefault();
+  const data = {
+    firstName: e.target.firstName.value,
+    lastName: e.target.lastName.value,
+    password: e.target.password.value
+  };
+  const updatedUser = { ...authState.user, ...data };
+  if(!data.password) delete updatedUser.password;
+  if(JSON.stringify(updatedUser) === JSON.stringify(authState.user))
+    toast.show('No changes made to update.', 'info');
+  else {
+    const success = await authState.updateProfile(updatedUser);
+    if(success) document.querySelector('.modal-overlay')?.remove();
+  }
+};
+
+// Expose Auth globally for logout
+import { authState as auth } from '../services/auth.js';
+window.auth = auth;
+EOF
+
+cat > src/components/Layout.js <<'EOF'
+import { Navbar } from './Navbar.js';
+
+export const Layout = () =>
+`
+  <div id="nav-mount">${Navbar()}</div>
+  <main>
+    <div data-outlet></div>
+  </main>
+  <footer style="background: white; border-top: 1px solid #eaeaea; padding: 4rem 0; margin-top: 4rem;">
+    <div class="container" style="text-align:center;">
+       <h3 style="margin-bottom:1rem; opacity:0.8;">Refai.Code</h3>
+       <div style="display:flex; justify-content:center; gap:1.5rem; margin-bottom:2rem;">
+         <a href="#" style="color:#666; text-decoration:none;">Instagram</a>
+         <a href="#" style="color:#666; text-decoration:none;">Twitter</a>
+         <a href="#" style="color:#666; text-decoration:none;">GitHub</a>
+       </div>
+       <p style="color:#999; font-size:0.9rem;">© 2026. All rights reserved.</p>
+    </div>
+  </footer>
+`;
+EOF
+
+# -----------------------------
+# 6. Pages (Auth & Logic)
+# -----------------------------
+cat > src/pages/LoginPage.js <<'EOF'
+import { authState } from '../services/auth.js';
+
+export const LoginPage = () => {
+  setTimeout(() => {
+    const form = document.getElementById('loginForm');
+    if(form) {
+      form.onsubmit = async (e) => {
+        e.preventDefault();
+        const email = form.email.value;
+        const pass = form.password.value;
+        const success = await authState.login(email, pass);
+        if(success) window.location.href = '/';
+      };
+    }
+  }, 0);
+
+  return `
+    <div class="auth-container">
+      <div class="glass-panel auth-box">
+        <div style="text-align:center; margin-bottom:2rem;">
+          <h2 style="font-size:2rem; margin-bottom:0.5rem;">Welcome Back</h2>
+          <p style="color:#6b7280;">Enter your credentials to access your account.</p>
+        </div>
+
+        <form id="loginForm">
+          <label style="font-weight:600; font-size:0.9rem; margin-bottom:0.5rem; display:block;">Email Address</label>
+          <input type="email" name="email" value="admin@refai.code" required placeholder="name@example.com">
+
+          <label style="font-weight:600; font-size:0.9rem; margin-bottom:0.5rem; display:block;">Password</label>
+          <input type="password" name="password" value="admin123" required placeholder="••••••••">
+
+          <button type="submit" class="btn btn-primary" style="width:100%; padding:0.9rem;">Sign In</button>
+        </form>
+
+        <div style="display:flex; align-items:center; margin: 2rem 0; color:#9ca3af; font-size:0.9rem;">
+          <div style="flex:1; height:1px; background:#e5e7eb;"></div>
+          <span style="padding:0 1rem;">OR CONTINUE WITH</span>
+          <div style="flex:1; height:1px; background:#e5e7eb;"></div>
+        </div>
+
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:1rem;">
+          <button class="btn btn-social">
+            <svg width="20" height="20" viewBox="0 0 24 24"><path fill="currentColor" d="M21.35,11.1H12.18V13.83H18.69C18.36,17.64 15.19,19.27 12.19,19.27C8.36,19.27 5,16.25 5,12.61C5,9.5 7.81,5.7 12.19,5.7C13.63,5.7 15.71,6.5 16.55,7.34L19.07,4.8C16.8,2.77 14.28,2.15 12.18,2.15C5.83,2.15 1.15,7.39 1.15,12.61C1.15,17.97 4.96,22.85 12.18,22.85C18.27,22.85 22.85,17.7 22.85,12.61C22.85,11.75 22.75,11.53 22.65,11.1H21.35Z"/></svg> Google
+          </button>
+          <button class="btn btn-social">
+            <svg width="20" height="20" viewBox="0 0 24 24"><path fill="currentColor" d="M12,2A10,10 0 0,0 2,12C2,16.42 4.87,20.17 8.84,21.5C9.34,21.58 9.5,21.27 9.5,21C9.5,20.77 9.5,20.14 9.5,19.31C6.73,19.91 6.14,17.97 6.14,17.97C5.68,16.81 5.03,16.5 5.03,16.5C4.12,15.88 5.1,15.9 5.1,15.9C6.1,15.97 6.63,16.93 6.63,16.93C7.5,18.45 8.97,18 9.54,17.76C9.63,17.11 9.89,16.67 10.17,16.42C7.95,16.17 5.62,15.31 5.62,11.5C5.62,10.39 6,9.5 6.65,8.79C6.55,8.54 6.2,7.5 6.75,6.15C6.75,6.15 7.59,5.88 9.5,7.17C10.29,6.95 11.15,6.84 12,6.84C12.85,6.84 13.71,6.95 14.5,7.17C16.41,5.88 17.25,6.15 17.25,6.15C17.8,7.5 17.45,8.54 17.35,8.79C18,9.5 18.38,10.39 18.38,11.5C18.38,15.32 16.04,16.16 13.81,16.41C14.17,16.72 14.5,17.33 14.5,18.26C14.5,19.6 14.5,20.68 14.5,21C14.5,21.27 14.66,21.59 15.17,21.5C19.14,20.16 22,16.42 22,12A10,10 0 0,0 12,2Z"/></svg> GitHub
+          </button>
+        </div>
+
+        <p style="text-align:center; margin-top:2rem; font-size:0.9rem;">
+          Don't have an account? <a href="/signup" data-link style="color:var(--primary); font-weight:600; text-decoration:none;">Sign Up</a>
+        </p>
+      </div>
+    </div>
+  `;
+};
+EOF
+
+cat > src/pages/SignupPage.js <<'EOF'
+import { authState } from '../services/auth.js';
+
+export const SignupPage = () => {
+  setTimeout(() => {
+    const form = document.getElementById('signupForm');
+    if(form) {
+      form.onsubmit = async (e) => {
+        e.preventDefault();
+        const data = {
+          firstName: form.firstName.value,
+          lastName: form.lastName.value,
+          email: form.email.value,
+          password: form.password.value
+        };
+        const success = await authState.signup(data);
+        if(success) window.location.href = '/login';
+      };
+    }
+  }, 0);
+
+  return `
+    <div class="auth-container">
+      <div class="glass-panel auth-box">
+        <div style="text-align:center; margin-bottom:2rem;">
+          <h2 style="font-size:2rem; margin-bottom:0.5rem;">Join Us</h2>
+          <p style="color:#6b7280;">Create your account to get started.</p>
+        </div>
+
+        <form id="signupForm">
+          <div style="display:grid; grid-template-columns: 1fr 1fr; gap:1rem;">
+             <div>
+               <label style="font-weight:600; font-size:0.9rem; margin-bottom:0.5rem; display:block;">First Name</label>
+               <input type="text" name="firstName" required placeholder="John">
+             </div>
+             <div>
+               <label style="font-weight:600; font-size:0.9rem; margin-bottom:0.5rem; display:block;">Last Name</label>
+               <input type="text" name="lastName" required placeholder="Doe">
+             </div>
+          </div>
+
+          <label style="font-weight:600; font-size:0.9rem; margin-bottom:0.5rem; display:block;">Email Address</label>
+          <input type="email" name="email" required placeholder="name@example.com">
+
+          <label style="font-weight:600; font-size:0.9rem; margin-bottom:0.5rem; display:block;">Password</label>
+          <input type="password" name="password" required placeholder="Create a password">
+
+          <button type="submit" class="btn btn-primary" style="width:100%; padding:0.9rem;">Create Account</button>
+        </form>
+
+        <p style="text-align:center; margin-top:2rem; font-size:0.9rem;">
+          Already have an account? <a href="/login" data-link style="color:var(--primary); font-weight:600; text-decoration:none;">Log In</a>
+        </p>
+      </div>
+    </div>
+  `;
+};
+EOF
+
+# Standard Pages (Home, Products, Details)
+cat > src/pages/HomePage.js <<'EOF'
+import { api } from '../services/api.js';
+
+export const HomePage = async () => {
+  return `
+    <header style="padding: 8rem 2rem; text-align:center; background: radial-gradient(circle at center, rgba(79,70,229,0.1), transparent 70%);">
+       <div class="container">
+         <span style="background:rgba(79,70,229,0.1); color:var(--primary); padding:0.4rem 1rem; border-radius:30px; font-weight:600; font-size:0.9rem;">
+           v2.0 Ultimate
+         </span>
+         <h1 style="font-size:4rem; margin:1.5rem 0; line-height:1.1;">
+           Build with <span style="background: linear-gradient(to right, #4f46e5, #ec4899); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">Precision</span>.
+         </h1>
+         <p style="font-size:1.4rem; color:#6b7280; max-width:600px; margin:0 auto 2.5rem;">
+           A fully functional MVC architecture with Authentication, Routing, and Live Database integration.
+         </p>
+         <div style="display:flex; gap:1rem; justify-content:center;">
+           <a href="/products" class="btn btn-primary" style="padding:1rem 2rem; font-size:1.1rem;" data-link>Fetch Data</a>
+           <a href="https://github.com/refai" target="_blank" class="btn btn-social" style="width:auto; padding:1rem 2rem; font-size:1.1rem;">Documentation</a>
+         </div>
+       </div>
+    </header>
+
+    <section id="about" style="background:white; padding:6rem 2rem;">
+      <div class="container">
+         <div style="text-align:center; margin-bottom:4rem;">
+           <h2 style="font-size:2.5rem; margin-bottom:1rem;">Why Refai.Code?</h2>
+           <p style="color:#6b7280;">Built for modern developers who need speed and structure.</p>
+         </div>
+
+         <div class="grid">
+           <div class="glass-panel" style="text-align:center; border:none; background:#f9fafb;">
+             <div style="font-size:2.5rem; margin-bottom:1rem;">⚡</div>
+             <h3 style="margin-bottom:0.5rem;">Concurrent Run</h3>
+             <p style="color:#6b7280;">Vite & Server run in a single command.</p>
+           </div>
+           <div class="glass-panel" style="text-align:center; border:none; background:#f9fafb;">
+             <div style="font-size:2.5rem; margin-bottom:1rem;">🔐</div>
+             <h3 style="margin-bottom:0.5rem;">Real Auth</h3>
+             <p style="color:#6b7280;">Users saved to JSON DB with persistent login.</p>
+           </div>
+           <div class="glass-panel" style="text-align:center; border:none; background:#f9fafb;">
+             <div style="font-size:2.5rem; margin-bottom:1rem;">💅</div>
+             <h3 style="margin-bottom:0.5rem;">Glass UI</h3>
+             <p style="color:#6b7280;">Modern aesthetics with blurred backgrounds.</p>
+           </div>
+         </div>
+      </div>
+    </section>
+  `;
+};
+EOF
+
+cat > src/pages/ProductsPage.js <<'EOF'
+import { api } from '../services/api.js';
+import { renderStars } from '../utils/helpers.js';
+
+export const ProductsPage = async () => {
+  let products = [];
+  try {
+    products = await api.get('/products');
+  } catch (e) {
+    // Fallback
+  }
+
+  return `<div class="container" style="padding-top:4rem;">
+       <h1 style="margin-bottom:2rem;">Featured Products</h1>
+       <div class="grid">
+         ${products.map(p => `
+           <div class="card">
+             <img src="${p.image}" class="card-img" alt="${p.name}">
+             <div class="card-body">
+               <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:0.5rem;">
+                 <h3 style="font-size:1.1rem; margin:0; font-weight:700;">${p.name}</h3>
+                 <span style="font-size:0.9rem; font-weight:600; color:var(--primary);">$${p.price}</span>
+               </div>
+               <div style="margin-bottom:1rem; font-size:0.9rem; color:#f59e0b;">
+                 ${renderStars(p.rating)}
+               </div>
+               <p style="font-size:0.9rem; color:#6b7280; flex:1; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; margin-bottom:1.5rem;">
+                 ${p.description}
+               </p>
+               <a href="/products/${p.id}" class="btn btn-primary" style="width:100%; justify-content:center;" data-link>View Details</a>
+             </div>
+           </div>
+         `).join('')}
+       </div>
+    </div>`;
+};
+EOF
+
+cat > src/pages/ProductDetailsPage.js <<'EOF'
+import { api } from '../services/api.js';
+import { renderStars } from '../utils/helpers.js';
+
+export const ProductDetailsPage = async ({ params }) => {
+  try {
+    const p = await api.get(`/products/${params.id}`);
+    return `<div class="container" style="padding-top:4rem;">
+        <a href="/products" data-link style="display:inline-flex; align-items:center; color:#6b7280; text-decoration:none; margin-bottom:2rem; font-weight:500;">
+          <svg style="width:20px; margin-right:5px;" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+          Back to Products
+        </a>
+
+        <div class="glass-panel" style="display:grid; grid-template-columns: 1fr 1fr; gap:3rem; padding:3rem;">
+           <img src="${p.image}" class="product-detail-img" style="width:100%; border-radius:12px;" alt="${p.name}">
+           <div>
+              <h1 style="font-size:2.5rem; margin:0 0 1rem 0;">${p.name}</h1>
+              <div style="display:flex; align-items:center; gap:1rem; margin-bottom:2rem;">
+                 <span style="font-size:1.5rem; font-weight:700; color:var(--primary);">$${p.price}</span>
+                 <div style="border-left:1px solid #ddd; padding-left:1rem; font-size:1.1rem; color:#f59e0b;">
+                   ${renderStars(p.rating)}
+                 </div>
+              </div>
+              <p style="color:#4b5563; line-height:1.7; font-size:1.1rem; margin-bottom:3rem;">
+                ${p.description}
+              </p>
+              <button class="btn btn-primary" style="padding:1rem 2rem; font-size:1.1rem; width:100%;" onclick="alert('Added to cart!')">
+                Add to Cart
+              </button>
+           </div>
+        </div>`;
+  } catch (e) {
+    return `<div class="container"><h1>Product Not Found</h1></div>`;
+  }
+};
+EOF
+
+# -----------------------------
+# 7. Main Entry Point
+# -----------------------------
+START_MARK='// ===== Refai.Code Router Setup (Auto-generated) ====='
+END_MARK='// ===== End Refai.Code Router Setup ====='
+
+router_block() {
+  local pwa_import=""
+  local pwa_init=""
+  if [[ "$pwa" == "true" ]]; then
+    pwa_import="import { registerPWA } from './pwa/register.js';"
+    pwa_init="registerPWA();"
+  fi
+
+  cat <<EOF
+import './styles/main.css';
+$pwa_import
+import { LiteRouter } from './router/LiteRouter.js';
+import { Layout } from './components/Layout.js';
+import { Navbar } from './components/Navbar.js';
+import { authState } from './services/auth.js';
+
+import { HomePage } from './pages/HomePage.js';
+import { ProductsPage } from './pages/ProductsPage.js';
+import { ProductDetailsPage } from './pages/ProductDetailsPage.js';
+import { LoginPage } from './pages/LoginPage.js';
+import { SignupPage } from './pages/SignupPage.js';
+
+const routes = [
+  { path: '/', component: HomePage, layout: Layout, title: 'Home | Refai.Code' },
+  { path: '/products', component: ProductsPage, layout: Layout, title: 'Products' },
+  { path: '/products/:id', component: ProductDetailsPage, layout: Layout, title: 'Details' },
+  { path: '/login', component: LoginPage, layout: Layout, title: 'Login' },
+  { path: '/logout', component: () => { authState.logout(); return '<div></div>'; } },
+  { path: '/signup', component: SignupPage, layout: Layout, title: 'Signup' },
+  { path: '*', component: () => '<h1 class="container">404</h1>', layout: Layout }
+];
+
+authState.subscribe(() => {
+  const el = document.getElementById('nav-mount');
+  if (el) el.innerHTML = Navbar();
+});
+
+$pwa_init
+new LiteRouter(routes, '#app').init();
+EOF
+}
+
+ensure_main_js() {
+  mkdir -p src
+
+  local block_content
+  block_content=$(router_block)
+
+  if [[ -f "src/main.js" ]]; then
+    # Case 1: Markers already exist => Replace content between them
+    if grep -qF "$START_MARK" src/main.js && grep -qF "$END_MARK" src/main.js; then
+      print -n "⚠️  Refai router block found in main.js. Update it? (y/N) "
+      read -k 1 choice; echo ""
+      if [[ "$choice" == [Yy] ]]; then
+        # Use awk to replace block
+        awk -v s="$START_MARK" -v e="$END_MARK" -v r="$block_content" '
+          BEGIN {p=1}
+          $0 == s {print s; print r; p=0}
+          $0 == e {p=1; print e; next}
+          p {print}
+        ' src/main.js > src/main.js.tmp && mv src/main.js.tmp src/main.js
+        ok "Updated router block in main.js"
+      fi
+      return 0
+    fi
+
+    # Case 2: No markers, but Refai code (LiteRouter) detected => Wrap it with markers or replace
+    if grep -q "LiteRouter" src/main.js; then
+      print -n "⚠️  LiteRouter detected but no markers found. Replace entire main.js to fix structure? (y/N) "
+      read -k 1 choice; echo ""
+      if [[ "$choice" == [Yy] ]]; then
+        cp src/main.js "src/main.js.backup.$(date +%Y%m%d-%H%M%S)"
+        {
+          echo "$START_MARK"
+          echo "$block_content"
+          echo "$END_MARK"
+        } > src/main.js
+        ok "Replaced main.js with structured Refai block."
+      fi
+      return 0
+    fi
+
+    # Case 3: Completely foreign file => Append block with markers
+    print -n "⚠️  src/main.js exists. Append Refai router block at the end? (y/N) "
+    read -k 1 choice; echo ""
+    if [[ "$choice" == [Yy] ]]; then
+      cp src/main.js "src/main.js.backup.$(date +%Y%m%d-%H%M%S)"
+      {
+        echo -e "\n$START_MARK"
+        echo "$block_content"
+        echo "$END_MARK"
+      } >> src/main.js
+      ok "Appended Refai block to main.js"
+    fi
+  else
+    # File doesn't exist => Create new one WITH markers
+    echo "📝 Creating new src/main.js..."
+    {
+      echo "$START_MARK"
+      echo "$block_content"
+      echo "$END_MARK"
+    } > src/main.js
+    ok "Created src/main.js with markers."
+  fi
+}
+
+ensure_main_js
+
+# -----------------------------
+# 8. Dependency & Concurrent
+# -----------------------------
+# Create DB.json
+cat > db.json <<'EOF'
+{
+  "users": [
+    {
+      "id": 1,
+      "email": "admin@refai.code",
+      "password": "admin123",
+      "firstName": "Super",
+      "lastName": "Admin",
+      "avatar": "https://ui-avatars.com/api/?name=Refai+Code&background=4f46e5&color=fff"
+    }
+  ],
+  "products": [
+    {
+      "id": 1,
+      "name": "Sony WH-1000XM5",
+      "price": 348,
+      "rating": 4.8,
+      "image": "https://images.unsplash.com/photo-1618366712010-f4ae9c647dcb?auto=format&fit=crop&w=600&q=80",
+      "description": "Industry-leading noise canceling with two processors controlling 8 microphones for unprecedented noise cancellation."
+    },
+    {
+      "id": 2,
+      "name": "Apple MacBook Air M2",
+      "price": 1099,
+      "rating": 4.9,
+      "image": "https://images.unsplash.com/photo-1517336714731-489689fd1ca4?auto=format&fit=crop&w=600&q=80",
+      "description": "Redesigned around the next-generation M2 chip. Strikingly thin and brings exceptional speed and power efficiency."
+    }
+  ]
+}
+EOF
+
+# -----------------------------
+# 8. Package Installation
+# -----------------------------
+echo "\n📦 Installing Dependencies..."
+if [ -f "pnpm-lock.yaml" ]; then PM="pnpm"; elif [ -f "yarn.lock" ]; then PM="yarn"; else PM="npm"; fi
+
+$PM install
+installed_packages+=("Core dependencies")
+
+if [ "$tail" = true ]; then
+  echo "🎨 Setting up TailwindCSS..."
+  $PM install -D tailwindcss postcss autoprefixer
+
+  # Initialize tailwind config
+  if [[ -f "node_modules/.bin/tailwindcss" ]]; then
+    ./node_modules/.bin/tailwindcss init -p
+  else
+    npx -y --package tailwindcss tailwindcss init -p
+  fi
+
+  cat > src/styles/tailwind.css <<EOF
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+EOF
+  echo "@import './tailwind.css';" | cat - src/styles/main.css > temp && mv temp src/styles/main.css
+  installed_packages+=("TailwindCSS")
+fi
+
+if [ "$axio" = true ]; then
+  echo "📡 Installing Axios..."
+  $PM install axios
+  installed_packages+=("Axios")
+fi
+
+if [ "$json" = true ]; then
+  echo "🚀 Setting up JSON Server..."
+  $PM install -D json-server concurrently
+
+  # Inject Scripts into package.json (dev for Vite only, dev:full for both)
+  node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.scripts=p.scripts||{};p.scripts['dev:full']='concurrently \"vite\" \"json-server db.json --port 3000\"';if(!p.scripts.dev || p.scripts.dev.includes('concurrently')) p.scripts.dev='vite';fs.writeFileSync('package.json',JSON.stringify(p,null,2));"
+  installed_packages+=("JSON Server" "Concurrently")
+fi
+
+# PWA Setup
+# -----------------------------
+# PWA Setup (FULL)
+# -----------------------------
+if [ "$pwa" = true ]; then
+  echo "📱 Setting up PWA..."
+
+  # Install plugin
+  $PM install -D vite-plugin-pwa
+  installed_packages+=("Vite PWA Plugin")
+
+  # Ensure public/ exists
+  mkdir -p public
+
+  # 1) Generate real PNG icons (no external deps)
+  # Creates:
+  # - public/pwa-192x192.png
+  # - public/pwa-512x512.png
+  # - public/apple-touch-icon.png
+  node - <<'NODE'
+const fs = require('fs');
+const zlib = require('zlib');
+
+function crc32(buf) {
+  let c = ~0;
+  for (let i = 0; i < buf.length; i++) {
+    c ^= buf[i];
+    for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xEDB88320 & (-(c & 1)));
+  }
+  return (~c) >>> 0;
+}
+function chunk(type, data) {
+  const t = Buffer.from(type, 'ascii');
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length, 0);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(Buffer.concat([t, data])), 0);
+  return Buffer.concat([len, t, data, crc]);
+}
+function makePng(size, outPath) {
+  const width = size, height = size;
+  const raw = Buffer.alloc(width * height * 4);
+
+  const bg = { r: 0x4f, g: 0x46, b: 0xe5, a: 0xff }; // #4f46e5
+  const fg = { r: 0xff, g: 0xff, b: 0xff, a: 0xff }; // white
+
+  const badgeSize = Math.floor(size * 0.46);
+  const badgeStart = Math.floor((size - badgeSize) / 2);
+  const badgeEnd = badgeStart + badgeSize;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      let c = bg;
+      if (x >= badgeStart && x < badgeEnd && y >= badgeStart && y < badgeEnd) c = fg;
+      raw[i+0] = c.r; raw[i+1] = c.g; raw[i+2] = c.b; raw[i+3] = c.a;
+    }
+  }
+
+  const stride = width * 4;
+  const scan = Buffer.alloc((stride + 1) * height);
+  for (let y = 0; y < height; y++) {
+    scan[y * (stride + 1)] = 0; // filter 0
+    raw.copy(scan, y * (stride + 1) + 1, y * stride, (y + 1) * stride);
+  }
+
+  const signature = Buffer.from([0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A]);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;  // bit depth
+  ihdr[9] = 6;  // color type RGBA
+  ihdr[10] = 0; // compression
+  ihdr[11] = 0; // filter
+  ihdr[12] = 0; // interlace
+
+  const idatData = zlib.deflateSync(scan, { level: 9 });
+  const png = Buffer.concat([
+    signature,
+    chunk('IHDR', ihdr),
+    chunk('IDAT', idatData),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
+
+  fs.writeFileSync(outPath, png);
+}
+
+fs.mkdirSync('public', { recursive: true });
+makePng(192, 'public/pwa-192x192.png');
+makePng(512, 'public/pwa-512x512.png');
+makePng(180, 'public/apple-touch-icon.png');
+console.log('✅ PWA icons generated: 192, 512, 180');
+NODE
+
+  # 2) Write manifest.webmanifest
+  cat > public/manifest.webmanifest <<'EOF'
+{
+  "name": "Refai App",
+  "short_name": "Refai",
+  "description": "Vite PWA powered by Refai.Code",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#4f46e5",
+  "icons": [
+    { "src": "/pwa-192x192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/pwa-512x512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/pwa-512x512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
+EOF
+
+  # 3) Ensure index.html links the manifest + theme color + apple touch icon
+  if [ -f index.html ]; then
+    # Add manifest link if missing
+    if ! grep -q 'manifest\.webmanifest' index.html; then
+      # insert before </head> using | as delimiter to avoid hex code # conflict
+      perl -0777 -i -pe 's|</head>|  <link rel="manifest" href="/manifest.webmanifest">\n  <meta name="theme-color" content="#4f46e5">\n  <link rel="apple-touch-icon" href="/apple-touch-icon.png">\n</head>|s' index.html
+      echo "✅ Updated index.html (manifest + theme-color + apple-touch-icon)"
+    else
+      echo "✅ index.html already has manifest link"
+    fi
+  fi
+
+  # 4) Create/overwrite vite.config.js with correct PWA config
+  cat > vite.config.js <<'EOF'
+import { defineConfig } from 'vite';
+import path from 'path';
+import { VitePWA } from 'vite-plugin-pwa';
+
+export default defineConfig({
+  resolve: { alias: { '@': path.resolve(__dirname, './src') } },
+  plugins: [
+    VitePWA({
+      registerType: 'autoUpdate',
+      injectRegister: 'auto',
+      devOptions: {
+        enabled: true,
+        type: 'module'
+      },
+      workbox: {
+        globPatterns: ['**/*.{js,css,html,ico,png,svg,webmanifest}']
+      },
+      includeAssets: [
+        'apple-touch-icon.png',
+        'pwa-192x192.png',
+        'pwa-512x512.png'
+      ],
+      manifest: {
+        name: 'Refai App',
+        short_name: 'Refai',
+        description: 'Vite PWA powered by Refai.Code',
+        start_url: '/',
+        scope: '/',
+        display: 'standalone',
+        background_color: '#ffffff',
+        theme_color: '#4f46e5',
+        icons: [
+          { src: 'pwa-192x192.png', sizes: '192x192', type: 'image/png' },
+          { src: 'pwa-512x512.png', sizes: '512x512', type: 'image/png' },
+          { src: 'pwa-512x512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' }
+        ]
+      }
+    })
+  ]
+});
+EOF
+
+  # 5) Add a small SW hook file (optional but useful) + include it from main.js
+  # We'll create src/pwa/register.js and then import it from src/main.js (if main.js exists)
+  mkdir -p src/pwa
+
+  cat > src/pwa/register.js <<'EOF'
+export function registerPWA() {
+  // vite-plugin-pwa with injectRegister:'auto' registers automatically.
+  // This file is just a safe place to add UX hooks (optional).
+  if ('serviceWorker' in navigator) {
+    // Optional: listen for SW updates
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      // SW updated and controlling the page
+      console.log('[PWA] controller changed');
+    });
+  }
+}
+EOF
+
+  # Note: PWA registration is now handled inside the main.js router block for consistency
+  installed_packages+=("PWA (manifest + icons + SW)")
+
+else
+  # If PWA not selected, keep normal vite.config.js
+  cat > vite.config.js <<EOF
+import { defineConfig } from 'vite';
+import path from 'path';
+
+export default defineConfig({
+  resolve: { alias: { '@': path.resolve(__dirname, './src') } },
+});
+EOF
+fi
+# -----------------------------
+# Final Summary
+# -----------------------------
+print "\n✅ \033[1;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+print "\n🎉 \033[1;32mSetup Complete!\033[0m Created by Refai.Code\n"
+
+if [ ${#installed_packages[@]} -gt 0 ]; then
+  print "📦 \033[1;36mInstalled Packages:\033[0m"
+  for pkg in "${installed_packages[@]}"; do
+    print "   ✓ $pkg"
+  done
+  print ""
+fi
+
+print "🚀 \033[1;33mNext Steps:\033[0m"
+print "   1. Run \033[1m$PM run dev\033[0m to start Vite dev server"
+if [ "$json" = true ]; then
+  print "   2. Run \033[1m$PM run dev:full\033[0m to start Vite + JSON Server together"
+  print "   3. Or run \033[1mnpx json-server db.json --port 3000\033[0m in a separate terminal"
+fi
+print "\n✅ \033[1;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n"
